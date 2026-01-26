@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Widget</class>
+ <widget class="QWidget" name="Widget">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1370</width>
+    <height>770</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Widget</string>
+  </property>
+  <widget class="QGroupBox" name="groupBox">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1366</width>
+     <height>768</height>
+    </rect>
+   </property>
+   <property name="styleSheet">
+    <string notr="true">#groupBox {
+ background-image: url(:/resources/img/BG.png);
+}</string>
+   </property>
+   <property name="title">
+    <string/>
+   </property>
+   <widget class="QLabel" name="Video_1">
+    <property name="geometry">
+     <rect>
+      <x>540</x>
+      <y>5</y>
+      <width>822</width>
+      <height>543</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">background-color: rgb(75, 75, 75);
+color: rgb(0, 0, 0);
+font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
+    </property>
+    <property name="text">
+     <string>1</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignCenter</set>
+    </property>
+   </widget>
+   <widget class="QLabel" name="Video_2">
+    <property name="geometry">
+     <rect>
+      <x>540</x>
+      <y>556</y>
+      <width>822</width>
+      <height>209</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">background-color: rgb(75, 75, 75);
+color: rgb(0, 0, 0);
+font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
+    </property>
+    <property name="text">
+     <string>3</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignCenter</set>
+    </property>
+   </widget>
+   <widget class="QLabel" name="Video_3">
+    <property name="geometry">
+     <rect>
+      <x>7</x>
+      <y>7</y>
+      <width>524</width>
+      <height>758</height>
+     </rect>
+    </property>
+    <property name="styleSheet">
+     <string notr="true">background-color: rgb(75, 75, 75);
+color: rgb(0, 0, 0);
+font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
+    </property>
+    <property name="text">
+     <string>2</string>
+    </property>
+    <property name="alignment">
+     <set>Qt::AlignCenter</set>
+    </property>
+   </widget>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
