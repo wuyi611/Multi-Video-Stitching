@@ -2,3 +2,5 @@
 build/
 ffmpeg-8.0-full_build-shared/
 cuda12.6/
+oneapi-tbb-2022.3.0/
+OpenCV4.10/

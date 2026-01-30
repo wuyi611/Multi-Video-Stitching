@@ -1,4 +1,4 @@
-QT       += core gui openglwidgets
+QT       += core gui openglwidgets xml
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
@@ -43,3 +43,10 @@ LIBS += -L$$PWD/cuda12.6/lib/x64 -lcuda -lcudart
 INCLUDEPATH += $$PWD/cuda12.6/include
 DEPENDPATH += $$PWD/cuda12.6/include
 
+
+# OpenCV4.10
+win32:CONFIG(release, debug|release): LIBS += -L$$PWD/OpenCV4.10/x64/vc16/lib/ -lopencv_img_hash4100 -lopencv_world4100
+else:win32:CONFIG(debug, debug|release): LIBS += -L$$PWD/OpenCV4.10/x64/vc16/lib/ -lopencv_img_hash4100d -lopencv_world4100d
+
+INCLUDEPATH += $$PWD/OpenCV4.10/include
+DEPENDPATH += $$PWD/OpenCV4.10/include
