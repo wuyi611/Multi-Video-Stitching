@@ -30,13 +30,13 @@
    <property name="title">
     <string/>
    </property>
-   <widget class="QLabel" name="Video_1">
+   <widget class="VideoOpenGLWidget" name="openGLWidget_1">
     <property name="geometry">
      <rect>
-      <x>540</x>
+      <x>539</x>
       <y>5</y>
-      <width>822</width>
-      <height>543</height>
+      <width>824</width>
+      <height>540</height>
      </rect>
     </property>
     <property name="styleSheet">
@@ -44,35 +44,8 @@
 color: rgb(0, 0, 0);
 font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
     </property>
-    <property name="text">
-     <string>1</string>
-    </property>
-    <property name="alignment">
-     <set>Qt::AlignCenter</set>
-    </property>
    </widget>
-   <widget class="QLabel" name="Video_2">
-    <property name="geometry">
-     <rect>
-      <x>540</x>
-      <y>556</y>
-      <width>822</width>
-      <height>209</height>
-     </rect>
-    </property>
-    <property name="styleSheet">
-     <string notr="true">background-color: rgb(75, 75, 75);
-color: rgb(0, 0, 0);
-font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
-    </property>
-    <property name="text">
-     <string>3</string>
-    </property>
-    <property name="alignment">
-     <set>Qt::AlignCenter</set>
-    </property>
-   </widget>
-   <widget class="QLabel" name="Video_3">
+   <widget class="VideoOpenGLWidget" name="openGLWidget_2">
     <property name="geometry">
      <rect>
       <x>7</x>
@@ -86,15 +59,31 @@ font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
 color: rgb(0, 0, 0);
 font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
     </property>
-    <property name="text">
-     <string>2</string>
+   </widget>
+   <widget class="VideoOpenGLWidget" name="openGLWidget_3">
+    <property name="geometry">
+     <rect>
+      <x>540</x>
+      <y>556</y>
+      <width>823</width>
+      <height>209</height>
+     </rect>
     </property>
-    <property name="alignment">
-     <set>Qt::AlignCenter</set>
+    <property name="styleSheet">
+     <string notr="true">background-color: rgb(75, 75, 75);
+color: rgb(0, 0, 0);
+font: 700 100pt &quot;Microsoft YaHei UI&quot;;</string>
     </property>
    </widget>
   </widget>
  </widget>
+ <customwidgets>
+  <customwidget>
+   <class>VideoOpenGLWidget</class>
+   <extends>QOpenGLWidget</extends>
+   <header location="global">VideoOpenGLWidget.h</header>
+  </customwidget>
+ </customwidgets>
  <resources/>
  <connections/>
 </ui>

@@ -1,2 +1,4 @@
 .qtcreator/
 build/
+ffmpeg-8.0-full_build-shared/
+cuda12.6/
