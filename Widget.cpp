@@ -33,7 +33,7 @@ int Widget::init()
         // 4. 初始化 解码线程
         decodeThreads[i] = new DecodeThread(this);
         decodeThreads[i]->setUrl(rtspUrl[i]);
-        QString xmlPt = QApplication::applicationDirPath() + "/camera_01.xml";
+        QString xmlPt = QApplication::applicationDirPath() + "/camera_params.xml";
         decodeThreads[i]->setCalibrationXmlPath(xmlPt);
 
         //5. 信号连接 (核心链路)

@@ -34,10 +34,10 @@ extern "C" {
 struct CalibrationParams {
     cv::Mat K;           // 原始内参
     cv::Mat D;           // 畸变系数
+    cv::Mat NewK;        // [新增] 矫正后的新内参 (从 XML 读取)
     cv::Rect roi;        // 感兴趣区域
     bool isValid = false;
 };
-
 class DecodeThread : public QThread
 {
     Q_OBJECT
