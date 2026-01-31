@@ -136,219 +136,262 @@ int DecodeThread::ReadTimeoutCallback(void *ctx)
     return 0;
 }
 
+// =========================================================================
+// [模块 1] FFmpeg 连接初始化
+// =========================================================================
+bool DecodeThread::initVideoConnection(FFmpegContext &ctx)
+{
+    if (url.isEmpty()) return false;
+
+    AVDictionary *opts = nullptr;
+    av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+    av_dict_set(&opts, "flags", "low_delay", 0);
+    av_dict_set(&opts, "fflags", "nobuffer", 0);
+    av_dict_set(&opts, "probesize", "1024000", 0);
+
+    ctx.fmtCtx = avformat_alloc_context();
+    ctx.fmtCtx->interrupt_callback.callback = ReadTimeoutCallback;
+    ctx.fmtCtx->interrupt_callback.opaque = this;
+    lastReadTime = std::chrono::high_resolution_clock::now();
+
+    if (avformat_open_input(&ctx.fmtCtx, url.toStdString().c_str(), nullptr, &opts) < 0) {
+        av_dict_free(&opts);
+        ffDebug("Open RTSP failed: " + url);
+        return false;
+    }
+    av_dict_free(&opts);
+
+    if (avformat_find_stream_info(ctx.fmtCtx, nullptr) < 0) return false;
+
+    ctx.videoStreamIndex = av_find_best_stream(ctx.fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (ctx.videoStreamIndex < 0) return false;
+
+    AVCodecParameters *codecPar = ctx.fmtCtx->streams[ctx.videoStreamIndex]->codecpar;
+    const AVCodec *codec = avcodec_find_decoder(codecPar->codec_id);
+    if (!codec) return false;
+
+    ctx.codecCtx = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(ctx.codecCtx, codecPar);
+
+    if (av_hwdevice_ctx_create(&ctx.hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) < 0) {
+        ffDebug("CUDA HW init failed");
+        return false;
+    }
+    ctx.codecCtx->hw_device_ctx = av_buffer_ref(ctx.hwDeviceCtx);
+    ctx.codecCtx->get_format = get_hw_format;
+
+    if (avcodec_open2(ctx.codecCtx, codec, nullptr) < 0) return false;
+
+    return true;
+}
+
+// =========================================================================
+// [模块 2] FFmpeg 资源释放
+// =========================================================================
+void DecodeThread::releaseVideoResources(FFmpegContext &ctx)
+{
+    if (ctx.codecCtx) {
+        avcodec_free_context(&ctx.codecCtx);
+        ctx.codecCtx = nullptr;
+    }
+    if (ctx.fmtCtx) {
+        avformat_close_input(&ctx.fmtCtx);
+        ctx.fmtCtx = nullptr;
+    }
+    if (ctx.hwDeviceCtx) {
+        av_buffer_unref(&ctx.hwDeviceCtx);
+        ctx.hwDeviceCtx = nullptr;
+    }
+}
+
+// =========================================================================
+// [模块 3] 分辨率检查与显存/映射表初始化
+// =========================================================================
+bool DecodeThread::checkResolutionAndInitResources(int width, int height, int stride)
+{
+    // 如果分辨率没变且缓冲区已分配，直接返回
+    if (m_pBuffers[0] != nullptr && width == m_currentW && height == m_currentH) {
+        return true;
+    }
+
+    ffDebug(QString("Resolution changed/Init: %1x%2").arg(width).arg(height));
+
+    // 1. 重新分配 CUDA 双缓冲
+    if (m_pBuffers[0]) cudaFree(m_pBuffers[0]);
+    if (m_pBuffers[1]) cudaFree(m_pBuffers[1]);
+
+    size_t y_size = (size_t)stride * height;
+    size_t uv_size = (size_t)stride * height / 2;
+    size_t total_size = y_size + uv_size;
+
+    cudaMalloc((void**)&m_pBuffers[0], total_size);
+    cudaMalloc((void**)&m_pBuffers[1], total_size);
+    cudaMemset(m_pBuffers[0], 0, total_size);
+    cudaMemset(m_pBuffers[1], 0, total_size);
+
+    m_currentW = width;
+    m_currentH = height;
+    m_bufferSize = total_size;
+    m_bufIdx = 0;
+
+    // 2. 初始化畸变矫正映射表
+    m_isMapInit = false; // 先置无效，直到加载成功
+    if (!m_xmlPath.isEmpty()) {
+        m_calibParams = loadParamsFromXml(m_xmlPath);
+
+        if (m_calibParams.isValid) {
+            ffDebug("正在根据 XML 生成 GPU 映射表...");
+            cv::Mat mapX, mapY;
+
+            // A. Y 平面映射表 (全分辨率)
+            // 关键：直接使用 XML 里的 NewK，不自己计算
+            cv::initUndistortRectifyMap(
+                m_calibParams.K, m_calibParams.D, cv::Mat(),
+                m_calibParams.NewK,
+                cv::Size(width, height), CV_32FC1, mapX, mapY
+                );
+
+            // B. UV 平面映射表 (通过缩放 Y Map 获得，防止重影)
+            // 这种方案能保证 UV 和 Y 的几何对齐最完美
+            cv::Mat mapX_UV, mapY_UV;
+            cv::resize(mapX, mapX_UV, cv::Size(width / 2, height / 2), 0, 0, cv::INTER_LINEAR);
+            cv::resize(mapY, mapY_UV, cv::Size(width / 2, height / 2), 0, 0, cv::INTER_LINEAR);
+            // 数值也要缩放
+            mapX_UV = mapX_UV / 2.0f;
+            mapY_UV = mapY_UV / 2.0f;
+
+            // 上传到 GPU
+            m_cudaMapX.upload(mapX);
+            m_cudaMapY.upload(mapY);
+            m_cudaMapX_UV.upload(mapX_UV);
+            m_cudaMapY_UV.upload(mapY_UV);
+
+            m_isMapInit = true;
+            ffDebug("GPU 映射表初始化完成 (Load XML + Resize UV)");
+        } else {
+            ffDebug("XML 参数无效，将不执行矫正");
+        }
+    }
+
+    // 3. 预分配 UV 通道分离所需的临时显存
+    // 此处仅确保尺寸匹配时重新分配
+    if (m_gpu_u_dst.size() != cv::Size(width/2, height/2)) {
+        m_gpu_u_dst.create(height/2, width/2, CV_8UC1);
+        m_gpu_v_dst.create(height/2, width/2, CV_8UC1);
+    }
+
+    return true;
+}
+
+// =========================================================================
+// [模块 4] 执行 CUDA 矫正逻辑 (核心算法)
+// =========================================================================
+void DecodeThread::executeCudaCorrection(AVFrame *frame, uint8_t *dst_y, uint8_t *dst_uv, int width, int height, int stride)
+{
+    // 如果没有初始化映射表，执行简单的内存拷贝
+    if (!m_isMapInit || m_cudaMapX.empty()) {
+        cudaMemcpy2D(dst_y, stride, frame->data[0], stride, width, height, cudaMemcpyDeviceToDevice);
+        cudaMemcpy2D(dst_uv, stride, frame->data[1], stride, width, height / 2, cudaMemcpyDeviceToDevice);
+        return;
+    }
+
+    // --- 1. Y 平面矫正 (单通道) ---
+    cv::cuda::GpuMat srcYMat(height, width, CV_8UC1, frame->data[0], stride);
+    cv::cuda::GpuMat dstYMat(height, width, CV_8UC1, dst_y, stride);
+    // Y 直接 Remap
+    cv::cuda::remap(srcYMat, dstYMat, m_cudaMapX, m_cudaMapY, cv::INTER_LINEAR);
+
+    // --- 2. UV 平面矫正 (拆分 -> Remap -> 合并) ---
+    // 为了避开 OpenCV 不支持 CV_8UC2 Remap 的限制，并保证插值质量
+    cv::cuda::GpuMat srcUVMat(height / 2, width / 2, CV_8UC2, frame->data[1], stride);
+    cv::cuda::GpuMat dstUVMat(height / 2, width / 2, CV_8UC2, dst_uv, stride);
+
+    // A. 拆分 (Split)
+    std::vector<cv::cuda::GpuMat> src_split_vec;
+    cv::cuda::split(srcUVMat, src_split_vec);
+    // src_split_vec[0] 是 U, [1] 是 V
+
+    // B. 分别 Remap (使用缩放后的 UV Map)
+    // 注意：m_gpu_u_dst 和 m_gpu_v_dst 已经在 initResources 中分配好，这里直接使用
+    cv::cuda::remap(src_split_vec[0], m_gpu_u_dst, m_cudaMapX_UV, m_cudaMapY_UV, cv::INTER_LINEAR);
+    cv::cuda::remap(src_split_vec[1], m_gpu_v_dst, m_cudaMapX_UV, m_cudaMapY_UV, cv::INTER_LINEAR);
+
+    // C. 合并 (Merge)
+    std::vector<cv::cuda::GpuMat> dst_split_vec = {m_gpu_u_dst, m_gpu_v_dst};
+    cv::cuda::merge(dst_split_vec, dstUVMat);
+}
+
+// =========================================================================
+// [重构] 核心主循环：只负责调度
+// =========================================================================
 void DecodeThread::runGpu()
 {
     cudaSetDevice(0);
 
     while (!stopFlag) {
-        AVFormatContext *fmtCtx = nullptr;
-        AVCodecContext *codecCtx = nullptr;
+        FFmpegContext ctx;
         AVPacket *pkt = av_packet_alloc();
         AVFrame *frame = av_frame_alloc();
-        AVBufferRef *hwDeviceCtx = nullptr;
-        const AVCodec *codec = nullptr;
-        int videoStream = -1;
 
-        do {
-            if (url.isEmpty()) { QThread::msleep(100); break; }
+        // 1. 尝试建立连接
+        if (!initVideoConnection(ctx)) {
+            // 连接失败清理
+            releaseVideoResources(ctx);
+            av_packet_free(&pkt);
+            av_frame_free(&frame);
 
-            AVDictionary *opts = nullptr;
-            av_dict_set(&opts, "rtsp_transport", "tcp", 0);
-            av_dict_set(&opts, "flags", "low_delay", 0);
-            av_dict_set(&opts, "fflags", "nobuffer", 0);
-            av_dict_set(&opts, "probesize", "1024000", 0);
-
-            fmtCtx = avformat_alloc_context();
-            fmtCtx->interrupt_callback.callback = ReadTimeoutCallback;
-            fmtCtx->interrupt_callback.opaque = this;
-            lastReadTime = std::chrono::high_resolution_clock::now();
-
-            if (avformat_open_input(&fmtCtx, url.toStdString().c_str(), nullptr, &opts) < 0) {
-                av_dict_free(&opts); ffDebug("Open RTSP failed: " + url); break;
+            if (!stopFlag) {
+                ffDebug("连接失败或中断，2秒后重试...");
+                QThread::sleep(2);
             }
-            av_dict_free(&opts);
+            continue; // 重试循环
+        }
 
-            if (avformat_find_stream_info(fmtCtx, nullptr) < 0) break;
-            videoStream = av_find_best_stream(fmtCtx, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-            if (videoStream < 0) break;
+        ffDebug("初始化成功，开始解码循环...");
 
-            AVCodecParameters *codecPar = fmtCtx->streams[videoStream]->codecpar;
-            codec = avcodec_find_decoder(codecPar->codec_id);
-            if (!codec) break;
+        // 2. 解码循环
+        while (!stopFlag) {
+            lastReadTime = std::chrono::high_resolution_clock::now();
+            int ret = av_read_frame(ctx.fmtCtx, pkt);
 
-            codecCtx = avcodec_alloc_context3(codec);
-            avcodec_parameters_to_context(codecCtx, codecPar);
+            if (ret < 0) {
+                if (ret == AVERROR(EAGAIN)) continue;
+                ffDebug("读取流结束或出错");
+                break; // 跳出内部循环，触发重连
+            }
 
-            if (av_hwdevice_ctx_create(&hwDeviceCtx, AV_HWDEVICE_TYPE_CUDA, nullptr, nullptr, 0) >= 0) {
-                codecCtx->hw_device_ctx = av_buffer_ref(hwDeviceCtx);
-                codecCtx->get_format = get_hw_format;
-            } else { ffDebug("CUDA HW init failed"); break; }
+            if (pkt->stream_index == ctx.videoStreamIndex) {
+                if (avcodec_send_packet(ctx.codecCtx, pkt) == 0) {
+                    while (avcodec_receive_frame(ctx.codecCtx, frame) == 0) {
+                        if (frame->format == AV_PIX_FMT_CUDA) {
+                            int width = frame->width;
+                            int height = frame->height;
+                            int stride = frame->linesize[0];
 
-            if (avcodec_open2(codecCtx, codec, nullptr) < 0) break;
-            ffDebug("初始化成功，开始解码循环...");
+                            // A. 检查分辨率 & 初始化显存/Map (如果是第一帧或分辨率变化)
+                            checkResolutionAndInitResources(width, height, stride);
 
-            while (!stopFlag) {
-                lastReadTime = std::chrono::high_resolution_clock::now();
-                int ret = av_read_frame(fmtCtx, pkt);
-                if (ret < 0) { if (ret == AVERROR(EAGAIN)) continue; ffDebug("Stream end/error"); break; }
+                            // B. 准备目标缓冲区
+                            m_bufIdx = 1 - m_bufIdx; // 切换双缓冲
+                            uint8_t* currentBuf = m_pBuffers[m_bufIdx];
+                            uint8_t* dst_y = currentBuf;
+                            uint8_t* dst_uv = currentBuf + ((size_t)stride * height);
 
-                if (pkt->stream_index == videoStream) {
-                    if (avcodec_send_packet(codecCtx, pkt) == 0) {
-                        while (avcodec_receive_frame(codecCtx, frame) == 0) {
-                            if (frame->format == AV_PIX_FMT_CUDA) {
-                                int width = frame->width;
-                                int height = frame->height;
-                                int srcStride = frame->linesize[0];
+                            // C. 执行矫正 (或拷贝)
+                            executeCudaCorrection(frame, dst_y, dst_uv, width, height, stride);
 
-                                // ------------------------------------------------
-                                // 1. 显存初始化与映射表生成
-                                // ------------------------------------------------
-                                if (m_pBuffers[0] == nullptr || width != m_currentW || height != m_currentH) {
-                                    ffDebug(QString("Resolution changed: %1x%2").arg(width).arg(height));
-
-                                    // 释放旧显存
-                                    if (m_pBuffers[0]) cudaFree(m_pBuffers[0]);
-                                    if (m_pBuffers[1]) cudaFree(m_pBuffers[1]);
-
-                                    int dstStride = srcStride;
-                                    size_t y_size = (size_t)dstStride * height;
-                                    size_t uv_size = (size_t)dstStride * height / 2;
-                                    size_t total_size = y_size + uv_size;
-
-                                    // 分配新双缓冲
-                                    cudaMalloc((void**)&m_pBuffers[0], total_size);
-                                    cudaMalloc((void**)&m_pBuffers[1], total_size);
-                                    cudaMemset(m_pBuffers[0], 0, total_size);
-                                    cudaMemset(m_pBuffers[1], 0, total_size);
-
-                                    m_currentW = width;
-                                    m_currentH = height;
-                                    m_bufferSize = total_size;
-                                    m_bufIdx = 0;
-
-                                    // ------------------------------------------------
-                                    // 2. [关键] 读取 XML 并生成 Map (直接使用 NewK)
-                                    // ------------------------------------------------
-                                    if (!m_xmlPath.isEmpty()) {
-                                        m_calibParams = loadParamsFromXml(m_xmlPath);
-
-                                        if (m_calibParams.isValid) {
-                                            cv::Mat mapX, mapY;
-
-                                            ffDebug("正在使用 XML 中的新内参生成映射表...");
-
-                                            // A. 生成 Y 平面映射表 (全分辨率)
-                                            // 直接使用 XML 里读出来的 m_calibParams.NewK
-                                            cv::initUndistortRectifyMap(
-                                                m_calibParams.K,
-                                                m_calibParams.D,
-                                                cv::Mat(),
-                                                m_calibParams.NewK, // <--- 关键修改：直接用 XML 参数
-                                                cv::Size(width, height),
-                                                CV_32FC1,
-                                                mapX,
-                                                mapY
-                                                );
-
-                                            // B. 生成 UV 平面映射表 (Resize 方案 - 防重影)
-                                            // 直接缩放 Y 的 Map，这是保证 Y 和 UV 严格对齐的最佳方法
-                                            cv::Mat mapX_UV, mapY_UV;
-
-                                            // 尺寸缩小一半
-                                            cv::resize(mapX, mapX_UV, cv::Size(width / 2, height / 2), 0, 0, cv::INTER_LINEAR);
-                                            cv::resize(mapY, mapY_UV, cv::Size(width / 2, height / 2), 0, 0, cv::INTER_LINEAR);
-
-                                            // 数值缩小一半
-                                            mapX_UV = mapX_UV / 2.0f;
-                                            mapY_UV = mapY_UV / 2.0f;
-
-                                            // 上传 GPU
-                                            m_cudaMapX.upload(mapX);
-                                            m_cudaMapY.upload(mapY);
-                                            m_cudaMapX_UV.upload(mapX_UV);
-                                            m_cudaMapY_UV.upload(mapY_UV);
-
-                                            m_isMapInit = true;
-                                            ffDebug("GPU 畸变矫正表初始化完成 (使用 XML 参数 + Resize UV)");
-                                        } else {
-                                            m_isMapInit = false;
-                                            ffDebug("XML 参数无效或缺少 NewCameraMatrix，跳过矫正");
-                                        }
-                                    }
-                                }
-
-                                // ------------------------------------------------
-                                // 3. 实时矫正与双缓冲写入
-                                // ------------------------------------------------
-                                m_bufIdx = 1 - m_bufIdx;
-                                uint8_t* currentBuf = m_pBuffers[m_bufIdx];
-                                uint8_t* dst_y = currentBuf;
-                                uint8_t* dst_uv = currentBuf + ((size_t)srcStride * height);
-
-                                if (m_isMapInit && !m_cudaMapX.empty()) {
-                                    // --- Y 平面 (CV_8UC1) ---
-                                    cv::cuda::GpuMat srcYMat(height, width, CV_8UC1, frame->data[0], srcStride);
-                                    cv::cuda::GpuMat dstYMat(height, width, CV_8UC1, dst_y, srcStride);
-
-                                    // Y 直接 Remap
-                                    cv::cuda::remap(srcYMat, dstYMat, m_cudaMapX, m_cudaMapY, cv::INTER_LINEAR);
-
-                                    // --- UV 平面 (CV_8UC2 -> 拆分 -> 矫正 -> 合并) ---
-                                    cv::cuda::GpuMat srcUVMat(height / 2, width / 2, CV_8UC2, frame->data[1], srcStride);
-                                    cv::cuda::GpuMat dstUVMat(height / 2, width / 2, CV_8UC2, dst_uv, srcStride);
-
-                                    // A. 拆分通道 (Split)
-                                    // 使用成员变量 m_gpu_u, m_gpu_v 避免重复 malloc
-                                    std::vector<cv::cuda::GpuMat> src_split_vec;
-                                    // split 需要 vector 作为输出容器，但我们可以让它指向预分配的 GpuMat
-                                    // (OpenCV split 如果发现尺寸类型匹配，会重用内存)
-                                    cv::cuda::split(srcUVMat, src_split_vec);
-                                    // 注意：这里 src_split_vec 里的 GpuMat 是 split 内部临时生成的还是引用的，
-                                    // 取决于实现。为了稳妥，我们可以直接让它们持有数据。
-
-                                    // 确保目标单通道缓存已分配
-                                    if (m_gpu_u_dst.size() != cv::Size(width/2, height/2)) {
-                                        m_gpu_u_dst.create(height/2, width/2, CV_8UC1);
-                                        m_gpu_v_dst.create(height/2, width/2, CV_8UC1);
-                                    }
-
-                                    // B. 分别矫正
-                                    // src_split_vec[0] 是 U, [1] 是 V
-                                    cv::cuda::remap(src_split_vec[0], m_gpu_u_dst, m_cudaMapX_UV, m_cudaMapY_UV, cv::INTER_LINEAR);
-                                    cv::cuda::remap(src_split_vec[1], m_gpu_v_dst, m_cudaMapX_UV, m_cudaMapY_UV, cv::INTER_LINEAR);
-
-                                    // C. 合并通道 (Merge)
-                                    std::vector<cv::cuda::GpuMat> dst_split_vec = {m_gpu_u_dst, m_gpu_v_dst};
-                                    cv::cuda::merge(dst_split_vec, dstUVMat);
-
-                                } else {
-                                    // [无标定] 原样拷贝
-                                    cudaMemcpy2D(dst_y, srcStride, frame->data[0], srcStride, width, height, cudaMemcpyDeviceToDevice);
-                                    cudaMemcpy2D(dst_uv, srcStride, frame->data[1], srcStride, width, height / 2, cudaMemcpyDeviceToDevice);
-                                }
-
-                                // ------------------------------------------------
-                                // 4. 发送给 UI 渲染
-                                // ------------------------------------------------
-                                emit newFrameDisplayGPU(currentBuf, dst_uv, width, height, srcStride);
-                            }
+                            // D. 发送信号
+                            emit newFrameDisplayGPU(currentBuf, dst_uv, width, height, stride);
                         }
                     }
                 }
-                av_packet_unref(pkt);
             }
-        } while (false);
-
-        // 资源清理
-        if (frame) av_frame_free(&frame);
-        if (pkt) av_packet_free(&pkt);
-        if (codecCtx) avcodec_free_context(&codecCtx);
-        if (fmtCtx) avformat_close_input(&fmtCtx);
-        if (hwDeviceCtx) av_buffer_unref(&hwDeviceCtx);
-
-        if (!stopFlag) {
-            ffDebug("连接中断，2秒后重试...");
-            QThread::sleep(2);
+            av_packet_unref(pkt);
         }
+
+        // 3. 资源清理
+        releaseVideoResources(ctx);
+        av_frame_free(&frame);
+        av_packet_free(&pkt);
     }
 }

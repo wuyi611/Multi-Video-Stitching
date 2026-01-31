@@ -38,6 +38,15 @@ struct CalibrationParams {
     cv::Rect roi;        // 感兴趣区域
     bool isValid = false;
 };
+
+// 封装 FFmpeg 上下文，方便在函数间传递
+struct FFmpegContext {
+    AVFormatContext *fmtCtx = nullptr;
+    AVCodecContext *codecCtx = nullptr;
+    AVBufferRef *hwDeviceCtx = nullptr;
+    int videoStreamIndex = -1;
+};
+
 class DecodeThread : public QThread
 {
     Q_OBJECT
@@ -65,8 +74,18 @@ private:
     static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts);
     static int ReadTimeoutCallback(void *ctx);
 
-    // XML 解析辅助函数 (使用 QDomDocument)
+    // XML 解析辅助函数
     CalibrationParams loadParamsFromXml(const QString &path);
+
+    // --- [新增] 重构后的功能函数 ---
+    // 1. 初始化 RTSP 连接
+    bool initVideoConnection(FFmpegContext &ctx);
+    // 2. 释放 FFmpeg 资源
+    void releaseVideoResources(FFmpegContext &ctx);
+    // 3. 检查分辨率变化并更新显存/映射表
+    bool checkResolutionAndInitResources(int width, int height, int stride);
+    // 4. 执行 CUDA 畸变矫正
+    void executeCudaCorrection(AVFrame *frame, uint8_t *dst_y, uint8_t *dst_uv, int width, int height, int stride);
 
 private:
     std::atomic<bool> stopFlag;
@@ -86,10 +105,11 @@ private:
     // --- 畸变矫正资源 ---
     CalibrationParams m_calibParams;     // 参数缓存
     bool m_isMapInit = false;            // 映射表是否初始化
-    cv::cuda::GpuMat m_cudaMapX, m_cudaMapY; // GPU 映射表
+    cv::cuda::GpuMat m_cudaMapX, m_cudaMapY; // GPU 映射表 (Y平面)
     cv::cuda::GpuMat m_cudaMapX_UV, m_cudaMapY_UV; // UV 专用映射表
-    cv::cuda::GpuMat m_gpu_u, m_gpu_v;      // 分离后的源 U, V
-    cv::cuda::GpuMat m_gpu_u_dst, m_gpu_v_dst; // 矫正后的 U, V
+
+    // UV 处理专用缓存 (避免重复分配)
+    cv::cuda::GpuMat m_gpu_u_dst, m_gpu_v_dst;
 };
 
 #endif // DECODETHREAD_H
