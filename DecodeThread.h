@@ -21,7 +21,6 @@
 // CUDA 运行时
 #include <cuda_runtime.h>
 
-// FFmpeg (C 语言兼容)
 extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -30,16 +29,26 @@ extern "C" {
 #include <libavutil/imgutils.h>
 }
 
-// 标定参数结构体
+// --- 参数结构体 ---
+
+// 1. 畸变矫正参数 (内参)
 struct CalibrationParams {
     cv::Mat K;           // 原始内参
     cv::Mat D;           // 畸变系数
-    cv::Mat NewK;        // [新增] 矫正后的新内参 (从 XML 读取)
-    cv::Rect roi;        // 感兴趣区域
+    cv::Mat NewK;        // 矫正后的新内参
     bool isValid = false;
 };
 
-// 封装 FFmpeg 上下文，方便在函数间传递
+// 2. 逆透视变换参数 (IPM)
+struct IPMParams {
+    std::vector<cv::Point2f> srcPoints; // 源点 (来自 txt)
+    cv::Size outSize;                   // 输出俯视图大小
+    cv::Mat homography;                 // 3x3 变换矩阵 (Y通道)
+    cv::Mat homographyUV;               // 3x3 变换矩阵 (UV通道，缩小版)
+    bool isValid = false;
+};
+
+// FFmpeg 上下文
 struct FFmpegContext {
     AVFormatContext *fmtCtx = nullptr;
     AVCodecContext *codecCtx = nullptr;
@@ -54,18 +63,26 @@ public:
     explicit DecodeThread(QObject *parent = nullptr);
     ~DecodeThread();
 
-    // 设置 RTSP 地址
+    // --- 设置接口 ---
     void setUrl(const QString &url);
-    // 设置标定 XML 文件路径
+
+    // 设置畸变矫正 XML
     void setCalibrationXmlPath(const QString &path);
-    // 停止线程
+
+    // 设置 IPM 坐标文件 (txt) 和输出尺寸
+    void setIPMConfig(const QString &txtPath, int outW, int outH);
+
+    // 功能开关
+    void setEnableUndistort(bool enable);
+    void setEnableIPM(bool enable);
+
     void stop();
 
 protected:
     void run() override;
 
 signals:
-    // 发出的信号是矫正后的画面 (显存指针)
+    // 发出的信号是最终处理后的显存指针
     void newFrameDisplayGPU(uint8_t* y, uint8_t* uv, int w, int h, int stride);
 
 private:
@@ -74,42 +91,70 @@ private:
     static enum AVPixelFormat get_hw_format(AVCodecContext *ctx, const enum AVPixelFormat *pix_fmts);
     static int ReadTimeoutCallback(void *ctx);
 
-    // XML 解析辅助函数
-    CalibrationParams loadParamsFromXml(const QString &path);
-
-    // --- [新增] 重构后的功能函数 ---
-    // 1. 初始化 RTSP 连接
+    // --- 资源初始化 ---
     bool initVideoConnection(FFmpegContext &ctx);
-    // 2. 释放 FFmpeg 资源
     void releaseVideoResources(FFmpegContext &ctx);
-    // 3. 检查分辨率变化并更新显存/映射表
+
+    // 统一资源检查入口
     bool checkResolutionAndInitResources(int width, int height, int stride);
-    // 4. 执行 CUDA 畸变矫正
-    void executeCudaCorrection(AVFrame *frame, uint8_t *dst_y, uint8_t *dst_uv, int width, int height, int stride);
+
+    // 分模块初始化
+    void initUndistortResources(int width, int height);
+    void initIPMResources(int width, int height); // 需根据图像尺寸计算 UV 矩阵
+
+    // --- 加载辅助 ---
+    CalibrationParams loadParamsFromXml(const QString &path);
+    std::vector<cv::Point2f> loadPointsFromTxt(const QString &path);
+
+    // --- CUDA 核心算法 (分离) ---
+    // 1. 执行畸变矫正: src -> dst
+    void executeCudaUndistort(const cv::cuda::GpuMat &srcY, const cv::cuda::GpuMat &srcUV,
+                              cv::cuda::GpuMat &dstY, cv::cuda::GpuMat &dstUV);
+
+    // 2. 执行逆透视: src -> dst
+    void executeCudaIPM(const cv::cuda::GpuMat &srcY, const cv::cuda::GpuMat &srcUV,
+                        cv::cuda::GpuMat &dstY, cv::cuda::GpuMat &dstUV);
 
 private:
     std::atomic<bool> stopFlag;
     bool debugEnable;
     QString url;
     QString m_xmlPath;
+    QString m_ipmTxtPath;
+    cv::Size m_ipmOutSize;
+
+    // 功能开关
+    bool m_enableUndistort = true;
+    bool m_enableIPM = false;
 
     std::chrono::high_resolution_clock::time_point lastReadTime;
 
-    // --- 显存管理 (双缓冲) ---
+    // --- 显存管理 ---
+    // 输出双缓冲 (用于显示)
     uint8_t* m_pBuffers[2] = {nullptr, nullptr};
-    size_t m_bufferSize = 0;
     int m_bufIdx = 0;
+
+    // 中间缓冲区 (用于 Undistort -> IPM 的串联)
+    // 只有当两者都开启时才使用
+    uint8_t* m_pMidBuffer = nullptr;
+
     int m_currentW = 0;
     int m_currentH = 0;
+    size_t m_frameSize = 0;
 
     // --- 畸变矫正资源 ---
-    CalibrationParams m_calibParams;     // 参数缓存
-    bool m_isMapInit = false;            // 映射表是否初始化
-    cv::cuda::GpuMat m_cudaMapX, m_cudaMapY; // GPU 映射表 (Y平面)
-    cv::cuda::GpuMat m_cudaMapX_UV, m_cudaMapY_UV; // UV 专用映射表
+    CalibrationParams m_calibParams;
+    bool m_isUndistortInit = false;
+    cv::cuda::GpuMat m_cudaMapX, m_cudaMapY;       // Y Map
+    cv::cuda::GpuMat m_cudaMapX_UV, m_cudaMapY_UV; // UV Map
 
-    // UV 处理专用缓存 (避免重复分配)
-    cv::cuda::GpuMat m_gpu_u_dst, m_gpu_v_dst;
+    // --- IPM 资源 ---
+    IPMParams m_ipmParams;
+    bool m_isIPMInit = false;
+
+    // --- 通用临时变量 (UV处理用) ---
+    cv::cuda::GpuMat m_gpu_u_split, m_gpu_v_split;
+    cv::cuda::GpuMat m_gpu_u_merge, m_gpu_v_merge;
 };
 
 #endif // DECODETHREAD_H

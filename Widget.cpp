@@ -27,14 +27,21 @@ int Widget::init()
     rtspUrl[1] = "rtsp://192.168.9.82:554/11";
     rtspUrl[2] = "rtsp://192.168.9.83:554/11";
 
+    pointPt[0] = QApplication::applicationDirPath() + "/calib_points_1.txt";
+    pointPt[1] = QApplication::applicationDirPath() + "/calib_points_2.txt";
+    pointPt[2] = QApplication::applicationDirPath() + "/calib_points_3.txt";
 
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 2; i++) {
 
         // 4. 初始化 解码线程
         decodeThreads[i] = new DecodeThread(this);
         decodeThreads[i]->setUrl(rtspUrl[i]);
         QString xmlPt = QApplication::applicationDirPath() + "/camera_params.xml";
         decodeThreads[i]->setCalibrationXmlPath(xmlPt);
+        decodeThreads[i]->setEnableUndistort(true); // 开启/关闭矫正
+
+        decodeThreads[i]->setIPMConfig(pointPt[i], glWidgets[i]->width(), glWidgets[i]->height());
+        decodeThreads[i]->setEnableIPM(true); // 开启/关闭 IPM
 
         //5. 信号连接 (核心链路)
 

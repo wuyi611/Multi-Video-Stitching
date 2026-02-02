@@ -27,7 +27,8 @@ private:
     Ui::Widget *ui;
 
     // --- 核心配置 ---
-    QString            rtspUrl[MAX_CNT];       // 6路 RTSP 地址存储
+    QString            rtspUrl[MAX_CNT];       // 3路 RTSP 地址存储
+    QString            pointPt[MAX_CNT];
 
     // --- 核心模块 (一一对应) ---
     DecodeThread* decodeThreads[MAX_CNT]; // 解码线程: 负责 拉流 -> NV12解码 -> GPU传输
