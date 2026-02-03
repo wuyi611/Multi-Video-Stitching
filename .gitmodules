@@ -1,0 +1,3 @@
+[submodule "IPM-Select-Point"]
+	path = IPM-Select-Point
+	url = git@github.com:wuyi611/IPM-Select-Point.git
